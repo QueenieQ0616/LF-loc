@@ -54,7 +54,7 @@ L_total = λ1 · L_cls + λ2 · (L_bce + L_dice) + λ3 · L_boundary
 
 ```bash
 # 克隆仓库
-git clone https://github.com/<你的账号>/LF-Loc.git
+git clone https://github.com/QueenieQ0616/LF-Loc.git
 cd LF-Loc
 
 # 环境（推荐 Python 3.9+，CUDA 12.1，PyTorch 2.2.0）
