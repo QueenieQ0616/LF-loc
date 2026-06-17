@@ -51,7 +51,7 @@ def visualize_batch(images, pred_masks, gt_masks, save_path="viz_batch.png"):
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"✅ Saved visualization to {save_path}")
+    print(f"Saved visualization to {save_path}")
 
 
 if __name__ == "__main__":

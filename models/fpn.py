@@ -69,4 +69,4 @@ if __name__ == "__main__":
 
     total_params = sum(p.numel() for p in fpn.parameters() if p.requires_grad)
     print(f"Trainable params: {total_params:,}")
-    print("✅ FPN test passed!")
+    print("FPN test passed!")

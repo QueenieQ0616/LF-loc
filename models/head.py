@@ -35,4 +35,4 @@ if __name__ == "__main__":
     print(f"Input:  {x.shape}")
     print(f"Output: {out.shape}")
     assert out.shape == (2, 1, 56, 56)
-    print("✅ SegHead test passed!")
+    print("SegHead test passed!")

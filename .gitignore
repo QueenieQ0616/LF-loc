@@ -4,3 +4,5 @@ checkpoints/
 logs/
 *.pth
 test_viz.png
+data/FaceForensics++/
+data/FaceForensics++.zip

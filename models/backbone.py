@@ -15,10 +15,11 @@ class FrozenBackbone(nn.Module):
     - CLIP:   C=768, H=W=14 (for 224 input)
     """
 
-    def __init__(self, model_name="vit_base_patch14_dinov2", img_size=224):
+    def __init__(self, model_name="vit_base_patch14_dinov2", img_size=224, pretrained=True):
         super().__init__()
         self.model_name = model_name
         self.img_size = img_size
+        self.pretrained = pretrained
 
         # Supported models
         supported = {
@@ -29,7 +30,7 @@ class FrozenBackbone(nn.Module):
 
         self.model = timm.create_model(
             supported[model_name],
-            pretrained=True,
+            pretrained=pretrained,
             img_size=img_size,
         )
 
@@ -58,7 +59,7 @@ class FrozenBackbone(nn.Module):
 
         if out.dim() == 3:
             # [B, N, C]
-            # ✅ 关键修复：丢掉第一个 token（CLS / Register Token）
+            # Drop the first token (CLS / register token).
             out = out[:, 1:, :]  # 257 -> 256
 
             N = out.shape[1]
@@ -86,4 +87,4 @@ if __name__ == "__main__":
     print(f"Input shape:  {x.shape}")
     print(f"Output shape: {out.shape}")
     print(f"Output channels: {model.out_channels}, Feat size: {model.feat_size}")
-    print("✅ Backbone test passed!")
+    print("Backbone test passed!")

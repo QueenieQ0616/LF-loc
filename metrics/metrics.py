@@ -1,16 +1,11 @@
 """
-Evaluation Metrics
-AUC / IoU / Dice / F1@pixel
+Evaluation metrics for LF-Loc.
 """
 import numpy as np
-from sklearn.metrics import roc_auc_score
 
 
 def compute_iou(pred, target, threshold=0.5):
-    """
-    IoU for binary segmentation.
-    Args: pred, target: [B, 1, H, W] or [H, W], values in [0, 1]
-    """
+    """IoU for binary segmentation."""
     pred = (pred > threshold).astype(np.float32)
     target = (target > 0.5).astype(np.float32)
 
@@ -22,9 +17,7 @@ def compute_iou(pred, target, threshold=0.5):
 
 
 def compute_dice(pred, target, threshold=0.5):
-    """
-    Dice coefficient for binary segmentation.
-    """
+    """Dice coefficient for binary segmentation."""
     pred = (pred > threshold).astype(np.float32)
     target = (target > 0.5).astype(np.float32)
 
@@ -36,9 +29,7 @@ def compute_dice(pred, target, threshold=0.5):
 
 
 def compute_f1_pixel(pred, target, threshold=0.5):
-    """
-    Pixel-level F1 score.
-    """
+    """Pixel-level F1 score."""
     pred = (pred > threshold).astype(np.int32)
     target = (target > 0.5).astype(np.int32)
 
@@ -55,20 +46,26 @@ def compute_f1_pixel(pred, target, threshold=0.5):
     return 2 * precision * recall / (precision + recall)
 
 
+def compute_pixel_acc(pred, target, threshold=0.5):
+    """Pixel accuracy for binary segmentation."""
+    pred = (pred > threshold).astype(np.int32)
+    target = (target > 0.5).astype(np.int32)
+    return (pred == target).mean()
+
+
 def compute_auc(pred_scores, labels):
-    """
-    ROC-AUC for classification.
-    Args:
-        pred_scores: [N] predicted probabilities
-        labels:      [N] binary ground truth
-    """
+    """ROC-AUC for classification."""
     if len(np.unique(labels)) < 2:
-        return 0.5  # Only one class present
+        return 0.5
+    try:
+        from sklearn.metrics import roc_auc_score
+    except Exception as exc:
+        raise ImportError("scikit-learn is required for AUC but is not available.") from exc
     return roc_auc_score(labels, pred_scores)
 
 
 class MetricTracker:
-    """Tracks metrics across batches."""
+    """Tracks segmentation metrics across batches."""
 
     def __init__(self):
         self.reset()
@@ -77,31 +74,35 @@ class MetricTracker:
         self.iou_list = []
         self.dice_list = []
         self.f1_list = []
+        self.pixel_acc_list = []
         self.losses = {}
 
     def update(self, pred_mask, gt_mask, loss_dict=None):
         """
-        pred_mask: numpy array [B, 1, H, W] logits
-        gt_mask:   numpy array [B, 1, H, W]
+        Args:
+            pred_mask: numpy array [B, 1, H, W] logits.
+            gt_mask: numpy array [B, 1, H, W].
         """
-        pred_prob = 1.0 / (1.0 + np.exp(-pred_mask))  # sigmoid
+        pred_prob = 1.0 / (1.0 + np.exp(-pred_mask))
 
         for i in range(pred_mask.shape[0]):
             self.iou_list.append(compute_iou(pred_prob[i], gt_mask[i]))
             self.dice_list.append(compute_dice(pred_prob[i], gt_mask[i]))
             self.f1_list.append(compute_f1_pixel(pred_prob[i], gt_mask[i]))
+            self.pixel_acc_list.append(compute_pixel_acc(pred_prob[i], gt_mask[i]))
 
         if loss_dict:
             for k, v in loss_dict.items():
                 if k not in self.losses:
                     self.losses[k] = []
-                self.losses[k].append(float(v))
+                self.losses[k].append(float(v.detach().cpu() if hasattr(v, "detach") else v))
 
     def get_results(self):
         results = {
             "IoU": np.mean(self.iou_list) if self.iou_list else 0.0,
             "Dice": np.mean(self.dice_list) if self.dice_list else 0.0,
             "F1@pixel": np.mean(self.f1_list) if self.f1_list else 0.0,
+            "PixelAcc": np.mean(self.pixel_acc_list) if self.pixel_acc_list else 0.0,
         }
         for k, v in self.losses.items():
             results[f"Loss/{k}"] = np.mean(v)
@@ -119,4 +120,4 @@ if __name__ == "__main__":
     print("Metrics test:")
     for k, v in results.items():
         print(f"  {k}: {v:.4f}")
-    print("✅ Metrics test passed!")
+    print("Metrics test passed!")
