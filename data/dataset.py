@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 
 DEFAULT_FFPP_METHODS = ("Deepfakes", "Face2Face", "FaceSwap", "NeuralTextures")
@@ -181,6 +181,7 @@ def build_dataloader(
     methods=DEFAULT_FFPP_METHODS,
     include_originals=False,
     shuffle=None,
+    balanced_by_label=False,
 ):
     """Build a DataLoader for fake data or FaceForensics++."""
     if dataset_type == "fake":
@@ -203,10 +204,24 @@ def build_dataloader(
     if shuffle is None:
         shuffle = split == "train"
 
+    sampler = None
+    if balanced_by_label:
+        labels = [int(float(sample.get("label", 1.0))) for sample in getattr(dataset, "samples", [])]
+        if labels and len(set(labels)) > 1:
+            counts = {label: labels.count(label) for label in set(labels)}
+            sample_weights = [1.0 / counts[label] for label in labels]
+            sampler = WeightedRandomSampler(
+                weights=torch.DoubleTensor(sample_weights),
+                num_samples=len(sample_weights),
+                replacement=True,
+            )
+            shuffle = False
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
     )

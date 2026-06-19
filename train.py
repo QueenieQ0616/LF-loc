@@ -4,6 +4,7 @@ Main training loop with AMP, checkpointing, and logging.
 """
 import os
 import argparse
+import numpy as np
 import torch
 import torch.optim as optim
 from contextlib import nullcontext
@@ -47,6 +48,18 @@ def parse_args():
     parser.add_argument("--lambda_boundary", type=float, default=1.0)
     parser.add_argument("--lambda_cls", type=float, default=1.0)
     parser.add_argument("--boundary_bce_weight", type=float, default=0.0)
+    parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--strict_resume", action="store_true")
+    parser.add_argument(
+        "--train_cls_only",
+        action="store_true",
+        help="Freeze LF-Loc localization modules and train only the image-level classification head.",
+    )
+    parser.add_argument(
+        "--balanced_cls_sampler",
+        action="store_true",
+        help="Use label-balanced sampling for FF++ classification training.",
+    )
     return parser.parse_args()
 
 
@@ -54,23 +67,60 @@ def amp_context(enabled):
     return autocast() if enabled else nullcontext()
 
 
-def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch):
+def freeze_for_cls_only(model):
+    """Freeze all modules except cls_head for image-level AUC tuning."""
+    for p in model.parameters():
+        p.requires_grad = False
+    for p in model.cls_head.parameters():
+        p.requires_grad = True
+
+
+def set_train_mode(model, train_cls_only=False):
     model.train()
+    if train_cls_only:
+        model.backbone.eval()
+        model.fpn.eval()
+        if model.fbaa is not None:
+            model.fbaa.eval()
+        model.head.eval()
+        model.cls_head.train()
+
+
+def safe_auc(labels, scores):
+    labels = np.asarray(labels, dtype=np.int64)
+    scores = np.asarray(scores, dtype=np.float64)
+    valid = np.isfinite(scores)
+    labels = labels[valid]
+    scores = scores[valid]
+    if labels.size == 0 or np.unique(labels).size < 2:
+        return None
+    try:
+        from sklearn.metrics import roc_auc_score
+    except Exception:
+        return None
+    return float(roc_auc_score(labels, scores))
+
+
+def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch, train_cls_only=False):
+    set_train_mode(model, train_cls_only=train_cls_only)
     tracker = MetricTracker()
     total_loss = 0.0
     use_amp = device.type == "cuda"
+    auc_labels = []
+    auc_scores = []
 
     pbar = tqdm(loader, desc=f"Epoch {epoch} [Train]")
     for batch in pbar:
         images = batch["image"].to(device)
         # print(f"DEBUG: Input image shape: {images.shape}")
         masks = batch["mask"].to(device)
+        labels = batch["label"].to(device)
 
         optimizer.zero_grad()
 
         with amp_context(use_amp):
             outputs = model(images, return_dict=True)
-            losses = criterion(outputs, masks)
+            losses = criterion(outputs, masks, gt_cls=labels)
 
         if use_amp:
             scaler.scale(losses["total"]).backward()
@@ -85,12 +135,19 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch):
         pred_np = pred_mask.detach().cpu().numpy()
         mask_np = masks.detach().cpu().numpy()
         tracker.update(pred_np, mask_np, losses)
+        if "cls_logits" in outputs:
+            cls_prob = torch.sigmoid(outputs["cls_logits"].reshape(outputs["cls_logits"].shape[0], -1)[:, 0])
+            auc_labels.extend(labels.detach().view(-1).cpu().numpy().astype(np.int64).tolist())
+            auc_scores.extend(cls_prob.detach().float().cpu().numpy().tolist())
 
         total_loss += losses["total"].item()
         pbar.set_postfix(loss=losses["total"].item())
 
     results = tracker.get_results()
     results["Loss/total"] = total_loss / len(loader)
+    auc = safe_auc(auc_labels, auc_scores)
+    if auc is not None:
+        results["ImageAUC"] = auc
     return results
 
 
@@ -99,24 +156,34 @@ def validate(model, loader, criterion, device):
     tracker = MetricTracker()
     total_loss = 0.0
     use_amp = device.type == "cuda"
+    auc_labels = []
+    auc_scores = []
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="[Val]"):
             images = batch["image"].to(device)
             masks = batch["mask"].to(device)
+            labels = batch["label"].to(device)
 
             with amp_context(use_amp):
                 outputs = model(images, return_dict=True)
-                losses = criterion(outputs, masks)
+                losses = criterion(outputs, masks, gt_cls=labels)
 
             pred_mask = outputs["mask_logits"]
             pred_np = pred_mask.detach().cpu().numpy()
             mask_np = masks.detach().cpu().numpy()
             tracker.update(pred_np, mask_np, losses)
+            if "cls_logits" in outputs:
+                cls_prob = torch.sigmoid(outputs["cls_logits"].reshape(outputs["cls_logits"].shape[0], -1)[:, 0])
+                auc_labels.extend(labels.detach().view(-1).cpu().numpy().astype(np.int64).tolist())
+                auc_scores.extend(cls_prob.detach().float().cpu().numpy().tolist())
             total_loss += losses["total"].item()
 
     results = tracker.get_results()
     results["Loss/total"] = total_loss / len(loader)
+    auc = safe_auc(auc_labels, auc_scores)
+    if auc is not None:
+        results["ImageAUC"] = auc
     return results
 
 
@@ -141,6 +208,23 @@ def main():
         use_fbaa=not args.disable_fbaa,
     ).to(device)
 
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location="cpu")
+        state_dict = checkpoint.get("model_state_dict", checkpoint)
+        incompatible = model.load_state_dict(state_dict, strict=args.strict_resume)
+        print(f"Resumed model weights from: {args.resume}")
+        if not args.strict_resume:
+            print(f"Missing keys: {list(incompatible.missing_keys)}")
+            print(f"Unexpected keys: {list(incompatible.unexpected_keys)}")
+
+    if args.train_cls_only:
+        freeze_for_cls_only(model)
+        args.lambda_seg = 0.0
+        args.lambda_boundary = 0.0
+        if args.lambda_cls <= 0:
+            args.lambda_cls = 1.0
+        print("Training mode: classification head only")
+
     # Print model info
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
@@ -153,6 +237,9 @@ def main():
     print(f"Image size:    {args.img_size}")
     print(f"FPN out ch:    {args.fpn_out}")
     print(f"Boundary BCE:  {args.boundary_bce_weight}")
+    print(f"Lambda cls:    {args.lambda_cls}")
+    print(f"Train cls only:{args.train_cls_only}")
+    print(f"Balanced cls:  {args.balanced_cls_sampler}")
     print(f"Dataset:       {args.dataset}")
     if args.dataset == "ffpp":
         print(f"Data root:     {args.data_root}")
@@ -196,6 +283,7 @@ def main():
         compression=args.compression,
         methods=args.methods,
         include_originals=args.include_originals,
+        balanced_by_label=args.balanced_cls_sampler,
     )
     val_loader = build_dataloader(
         batch_size=args.batch_size,
@@ -213,7 +301,8 @@ def main():
     )
 
     # Training loop
-    best_iou = 0.0
+    best_score = 0.0
+    best_metric = "ImageAUC" if args.train_cls_only else "IoU"
     for epoch in range(1, args.epochs + 1):
         print(f"\n{'='*60}")
         print(f"Epoch {epoch}/{args.epochs}")
@@ -221,7 +310,7 @@ def main():
 
         # Train
         train_results = train_one_epoch(
-            model, train_loader, criterion, optimizer, scaler, device, epoch
+            model, train_loader, criterion, optimizer, scaler, device, epoch, args.train_cls_only
         )
 
         # Validate
@@ -233,26 +322,28 @@ def main():
         # Print results
         print(f"\n{'Metric':<20} {'Train':>12} {'Val':>12}")
         print(f"{'-'*44}")
-        for k in ["Loss/total", "IoU", "Dice", "F1@pixel", "PixelAcc"]:
+        for k in ["Loss/total", "ImageAUC", "IoU", "Dice", "F1@pixel", "PixelAcc"]:
             train_v = train_results.get(k, 0)
             val_v = val_results.get(k, 0)
             print(f"{k:<20} {train_v:>12.4f} {val_v:>12.4f}")
 
         # Save best model
-        if val_results["IoU"] > best_iou:
-            best_iou = val_results["IoU"]
+        current_score = val_results.get(best_metric, val_results.get("IoU", 0.0))
+        if current_score > best_score:
+            best_score = current_score
             ckpt_path = os.path.join(args.save_dir, "best_model.pth")
             torch.save(
                 {
                     "epoch": epoch,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
-                    "best_iou": best_iou,
+                    "best_score": best_score,
+                    "best_metric": best_metric,
                     "args": vars(args),
                 },
                 ckpt_path,
             )
-            print(f"Saved best model (IoU={best_iou:.4f})")
+            print(f"Saved best model ({best_metric}={best_score:.4f})")
 
         # Save latest
         torch.save(
@@ -260,13 +351,14 @@ def main():
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
-                "best_iou": best_iou,
+                "best_score": best_score,
+                "best_metric": best_metric,
                 "args": vars(args),
             },
             os.path.join(args.save_dir, "latest.pth"),
         )
 
-    print(f"\nTraining complete! Best IoU: {best_iou:.4f}")
+    print(f"\nTraining complete! Best {best_metric}: {best_score:.4f}")
     print(f"Checkpoints saved to: {args.save_dir}")
 
 

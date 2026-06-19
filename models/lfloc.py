@@ -4,6 +4,7 @@ Main model file - assembles all components.
 """
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from .backbone import FrozenBackbone
 from .fpn import LightFPN
 from .fbaa import FBAA
@@ -52,6 +53,14 @@ class LFLOC(nn.Module):
 
         # Segmentation head
         self.head = SegHead(in_channels=fpn_out)
+        cls_in = self.backbone.out_channels * 2
+        self.cls_head = nn.Sequential(
+            nn.LayerNorm(cls_in),
+            nn.Linear(cls_in, 256),
+            nn.GELU(),
+            nn.Dropout(p=0.1),
+            nn.Linear(256, 1),
+        )
 
         # Store config for reference
         self.config = {
@@ -68,8 +77,12 @@ class LFLOC(nn.Module):
         Return: logits [B, 1, H, W] by default.
                 If return_dict=True, returns mask and boundary logits.
         """
-        feat = self.backbone(x)
-        feat = self.fpn(feat)
+        backbone_feat = self.backbone(x)
+        cls_avg = F.adaptive_avg_pool2d(backbone_feat, 1).flatten(1)
+        cls_max = F.adaptive_max_pool2d(backbone_feat, 1).flatten(1)
+        cls_logits = self.cls_head(torch.cat([cls_avg, cls_max], dim=1))
+
+        feat = self.fpn(backbone_feat)
         boundary_logits = None
         if self.fbaa is not None:
             feat, boundary_logits = self.fbaa(feat)
@@ -78,6 +91,7 @@ class LFLOC(nn.Module):
             return {
                 "mask_logits": logits,
                 "boundary_logits": boundary_logits,
+                "cls_logits": cls_logits,
             }
         return logits
 
@@ -97,6 +111,7 @@ if __name__ == "__main__":
     outputs = model(x, return_dict=True)
     logits = outputs["mask_logits"]
     boundary = outputs["boundary_logits"]
+    cls_logits = outputs["cls_logits"]
 
     print(f"\n{'='*50}")
     print(f"Model: LF-Loc")
@@ -104,6 +119,7 @@ if __name__ == "__main__":
     print(f"Input shape:   {x.shape}")
     print(f"Output shape:  {logits.shape}")
     print(f"Boundary:      {boundary.shape}")
+    print(f"Cls logits:    {cls_logits.shape}")
     print(f"Backbone:      {model.config['backbone']}")
     print(f"Img size:      {model.config['img_size']}")
     print(f"FPN out:       {model.config['fpn_out']}")
