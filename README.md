@@ -209,7 +209,7 @@ outputs/eval_results/loc_improved_bce2_e30/ffpp_auc_by_type.csv
 
 | Method | Dataset | Image AUC | IoU | Dice | PBCA |
 | --- | --- | ---: | ---: | ---: | ---: |
-| Face X-ray | FF++ | 0.9852 | - | - | - |
+| MSCCNet | FF++ c23 | 0.9894 | 0.8329 | - | - |
 | FakeLocator | FF++ | 0.9846 | 0.3097 | 0.0811 | 0.8687 |
 | LF-Loc 定位 checkpoint | FF++ c23 | - | 0.8588 | 0.9224 | 0.8976 |
 | LF-Loc AUC checkpoint | FF++ c23 | 0.7997 | 0.3912 | 0.4793 | 0.8324 |
