@@ -8,7 +8,7 @@
 
 | Method | Dataset | Image AUC | IoU | Dice | PBCA |
 | --- | --- | ---: | ---: | ---: | ---: |
-| MSCCNet | FF++ | 0.9894 | 0.8329 | - | - |
+| MSCCNet | FF++ c23 | 0.9894 | 0.8329 | - | - |
 | FakeLocator | FF++ | 0.9846 | 0.3097 | 0.0811 | 0.8687 |
 | LF-Loc（定位 checkpoint） | FF++ c23 | - | 0.8584 | 0.9222 | 0.8978 |
 | LF-Loc（分类头 balanced 微调 checkpoint） | FF++ c23 | 0.6747 | 0.8584 | 0.9222 | 0.8978 |
