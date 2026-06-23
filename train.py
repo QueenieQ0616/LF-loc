@@ -60,6 +60,12 @@ def parse_args():
         action="store_true",
         help="Use label-balanced sampling for FF++ classification training.",
     )
+    parser.add_argument(
+        "--cls_unfreeze_blocks",
+        type=int,
+        default=0,
+        help="When training cls only, unfreeze the last N backbone transformer blocks.",
+    )
     return parser.parse_args()
 
 
@@ -67,18 +73,43 @@ def amp_context(enabled):
     return autocast() if enabled else nullcontext()
 
 
-def freeze_for_cls_only(model):
+def unfreeze_backbone_tail(model, num_blocks):
+    if num_blocks <= 0:
+        return
+
+    backbone_model = model.backbone.model
+    blocks = getattr(backbone_model, "blocks", None)
+    if blocks is None:
+        raise AttributeError("Backbone does not expose a 'blocks' module for tail unfreezing.")
+
+    num_blocks = min(num_blocks, len(blocks))
+    for block in blocks[-num_blocks:]:
+        for p in block.parameters():
+            p.requires_grad = True
+
+    for name in ("norm", "fc_norm"):
+        norm = getattr(backbone_model, name, None)
+        if norm is not None:
+            for p in norm.parameters():
+                p.requires_grad = True
+
+
+def freeze_for_cls_only(model, cls_unfreeze_blocks=0):
     """Freeze all modules except cls_head for image-level AUC tuning."""
     for p in model.parameters():
         p.requires_grad = False
     for p in model.cls_head.parameters():
         p.requires_grad = True
+    unfreeze_backbone_tail(model, cls_unfreeze_blocks)
 
 
-def set_train_mode(model, train_cls_only=False):
+def set_train_mode(model, train_cls_only=False, cls_unfreeze_blocks=0):
     model.train()
     if train_cls_only:
-        model.backbone.eval()
+        if cls_unfreeze_blocks > 0:
+            model.backbone.train()
+        else:
+            model.backbone.eval()
         model.fpn.eval()
         if model.fbaa is not None:
             model.fbaa.eval()
@@ -101,8 +132,22 @@ def safe_auc(labels, scores):
     return float(roc_auc_score(labels, scores))
 
 
-def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch, train_cls_only=False):
-    set_train_mode(model, train_cls_only=train_cls_only)
+def train_one_epoch(
+    model,
+    loader,
+    criterion,
+    optimizer,
+    scaler,
+    device,
+    epoch,
+    train_cls_only=False,
+    cls_unfreeze_blocks=0,
+):
+    set_train_mode(
+        model,
+        train_cls_only=train_cls_only,
+        cls_unfreeze_blocks=cls_unfreeze_blocks,
+    )
     tracker = MetricTracker()
     total_loss = 0.0
     use_amp = device.type == "cuda"
@@ -218,7 +263,7 @@ def main():
             print(f"Unexpected keys: {list(incompatible.unexpected_keys)}")
 
     if args.train_cls_only:
-        freeze_for_cls_only(model)
+        freeze_for_cls_only(model, cls_unfreeze_blocks=args.cls_unfreeze_blocks)
         args.lambda_seg = 0.0
         args.lambda_boundary = 0.0
         if args.lambda_cls <= 0:
@@ -240,6 +285,7 @@ def main():
     print(f"Lambda cls:    {args.lambda_cls}")
     print(f"Train cls only:{args.train_cls_only}")
     print(f"Balanced cls:  {args.balanced_cls_sampler}")
+    print(f"Cls unfreeze:  {args.cls_unfreeze_blocks}")
     print(f"Dataset:       {args.dataset}")
     if args.dataset == "ffpp":
         print(f"Data root:     {args.data_root}")
@@ -310,7 +356,15 @@ def main():
 
         # Train
         train_results = train_one_epoch(
-            model, train_loader, criterion, optimizer, scaler, device, epoch, args.train_cls_only
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            scaler,
+            device,
+            epoch,
+            args.train_cls_only,
+            args.cls_unfreeze_blocks,
         )
 
         # Validate

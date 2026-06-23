@@ -2,6 +2,8 @@
 Frozen Backbone Module
 Supports: DINOv2-ViT-B/14 (default) and CLIP-ViT-B/16
 """
+from contextlib import nullcontext
+
 import torch
 import torch.nn as nn
 import timm
@@ -46,29 +48,32 @@ class FrozenBackbone(nn.Module):
             self.out_channels = 768
             self.feat_size = img_size // 16  # 14 for 224
 
-    @torch.no_grad()
     def forward(self, x):
         """
         Args: x [B, 3, H, W]
         Returns: features [B, C, feat_H, feat_W]
         """
-        out = self.model.forward_features(x)
+        use_grad = any(p.requires_grad for p in self.model.parameters())
+        context = nullcontext() if use_grad else torch.no_grad()
 
-        B = out.shape[0]
-        C = self.out_channels
+        with context:
+            out = self.model.forward_features(x)
 
-        if out.dim() == 3:
-            # [B, N, C]
-            # Drop the first token (CLS / register token).
-            out = out[:, 1:, :]  # 257 -> 256
+            B = out.shape[0]
+            C = self.out_channels
 
-            N = out.shape[1]
-            H = W = int(N ** 0.5)
-            out = out.transpose(1, 2).reshape(B, C, H, W)
+            if out.dim() == 3:
+                # [B, N, C]
+                # Drop the first token (CLS / register token).
+                out = out[:, 1:, :]  # 257 -> 256
 
-        elif out.dim() == 4:
-            # Already [B, C, H, W]
-            pass
+                N = out.shape[1]
+                H = W = int(N ** 0.5)
+                out = out.transpose(1, 2).reshape(B, C, H, W)
+
+            elif out.dim() == 4:
+                # Already [B, C, H, W]
+                pass
 
         return out
 
